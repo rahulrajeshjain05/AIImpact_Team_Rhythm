@@ -20,7 +20,7 @@ API_KEY_NAME = "access_token"
 API_KEY_VALUE = "HCL_SECURE_KEY_2026"
 
 # Get your Hugging Face token from the Space's Secret settings
-HF_TOKEN = os.getenv("HF_Token") 
+HF_TOKEN = os.getenv("HF_TOKEN") 
 
 MODEL_ID = "melba-t/wav2vec2-fake-speech-detection" 
 TARGET_SR = 16000
