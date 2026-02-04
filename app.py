@@ -1,12 +1,14 @@
 # ======================================================
-# HCL AI VOICE DETECTION API – HF SPACES (STABLE)
+# HCL AI VOICE DETECTION API – FINAL WORKING VERSION
 # ======================================================
 
 import base64
 import io
 import logging
+import numpy as np
 import torch
 import soundfile as sf
+import librosa
 
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +23,6 @@ from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 API_KEY_NAME = "access_token"
 API_KEY_VALUE = "HCL_SECURE_KEY_2026"
 
-# ✅ VERIFIED audio-classification model
 MODEL_ID = "superb/wav2vec2-base-superb-ks"
 TARGET_SR = 16000
 
@@ -63,7 +64,6 @@ app.add_middleware(
 class AudioRequest(BaseModel):
     audio_base64: str
 
-
 # ======================================================
 # SECURITY
 # ======================================================
@@ -72,21 +72,40 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
         raise HTTPException(status_code=403, detail="Invalid API Key")
     return api_key
 
-
 # ======================================================
-# AUDIO + INFERENCE
+# AUDIO DECODING (ROBUST – AUTO FIXES SAMPLE RATE)
 # ======================================================
 def decode_audio(b64_audio: str):
     try:
+        # Decode Base64
         audio_bytes = base64.b64decode(b64_audio.split(",")[-1])
+
+        # Read audio
         audio, sr = sf.read(io.BytesIO(audio_bytes))
+
+        # Stereo → mono
+        if audio.ndim > 1:
+            audio = np.mean(audio, axis=1)
+
+        # Resample ANY rate → 16kHz
         if sr != TARGET_SR:
-            raise ValueError("Audio must be 16kHz")
+            audio = librosa.resample(
+                audio.astype(float),
+                orig_sr=sr,
+                target_sr=TARGET_SR
+            )
+
         return audio
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Audio decode failed: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Audio decode failed: {str(e)}"
+        )
 
-
+# ======================================================
+# INFERENCE
+# ======================================================
 def analyze_voice(audio):
     inputs = feature_extractor(
         audio,
@@ -105,14 +124,12 @@ def analyze_voice(audio):
 
     return label, round(confidence.item(), 4)
 
-
 # ======================================================
 # ENDPOINTS
 # ======================================================
 @app.get("/health")
 def health():
     return {"status": "ok", "device": DEVICE}
-
 
 @app.post("/predict")
 async def predict(
