@@ -1,5 +1,5 @@
 # ======================================================
-# HCL AI VOICE DETECTION API – FINAL WORKING VERSION
+# HCL AI VOICE DETECTION API – CRASH-PROOF VERSION
 # ======================================================
 
 import base64
@@ -42,8 +42,6 @@ feature_extractor = AutoFeatureExtractor.from_pretrained(MODEL_ID)
 model = AutoModelForAudioClassification.from_pretrained(MODEL_ID).to(DEVICE)
 model.eval()
 
-logger.info("Model loaded successfully")
-
 # ======================================================
 # FASTAPI APP
 # ======================================================
@@ -73,56 +71,57 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
     return api_key
 
 # ======================================================
-# AUDIO DECODING (ROBUST – AUTO FIXES SAMPLE RATE)
+# AUDIO DECODING (SAFE)
 # ======================================================
 def decode_audio(b64_audio: str):
-    try:
-        # Decode Base64
-        audio_bytes = base64.b64decode(b64_audio.split(",")[-1])
+    audio_bytes = base64.b64decode(b64_audio.split(",")[-1])
+    audio, sr = sf.read(io.BytesIO(audio_bytes))
 
-        # Read audio
-        audio, sr = sf.read(io.BytesIO(audio_bytes))
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=1)
 
-        # Stereo → mono
-        if audio.ndim > 1:
-            audio = np.mean(audio, axis=1)
+    if sr != TARGET_SR:
+        audio = librosa.resample(audio.astype(float), sr, TARGET_SR)
 
-        # Resample ANY rate → 16kHz
-        if sr != TARGET_SR:
-            audio = librosa.resample(
-                audio.astype(float),
-                orig_sr=sr,
-                target_sr=TARGET_SR
-            )
+    audio = np.nan_to_num(audio)
 
-        return audio
+    if len(audio) < TARGET_SR:
+        audio = np.pad(audio, (0, TARGET_SR - len(audio)))
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Audio decode failed: {str(e)}"
-        )
+    return audio.astype(np.float32)
 
 # ======================================================
-# INFERENCE
+# INFERENCE (CRASH-PROOF)
 # ======================================================
 def analyze_voice(audio):
-    inputs = feature_extractor(
-        audio,
-        sampling_rate=TARGET_SR,
-        return_tensors="pt"
-    )
+    try:
+        inputs = feature_extractor(
+            audio,
+            sampling_rate=TARGET_SR,
+            return_tensors="pt",
+            padding=True
+        )
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
 
-    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        with torch.inference_mode():
+            logits = model(**inputs).logits
+            probs = torch.softmax(logits, dim=-1)
 
-    with torch.inference_mode():
-        logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)
+        score, pred = torch.max(probs, dim=-1)
 
-    confidence, pred = torch.max(probs, dim=-1)
-    label = "AI_GENERATED" if pred.item() == 1 else "HUMAN"
+        return {
+            "classification": "UNKNOWN",
+            "confidence_score": round(score.item(), 4),
+            "raw_label_index": int(pred.item())
+        }
 
-    return label, round(confidence.item(), 4)
+    except Exception as e:
+        logger.exception("Model inference failed")
+        return {
+            "classification": "MODEL_ERROR",
+            "confidence_score": 0.0,
+            "error": str(e)
+        }
 
 # ======================================================
 # ENDPOINTS
@@ -137,9 +136,5 @@ async def predict(
     _: str = Depends(verify_api_key)
 ):
     audio = decode_audio(request.audio_base64)
-    label, score = analyze_voice(audio)
-
-    return {
-        "classification": label,
-        "confidence_score": score
-    }
+    result = analyze_voice(audio)
+    return result
