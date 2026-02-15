@@ -2,30 +2,19 @@ import os
 import base64
 import logging
 import tempfile
+import subprocess
 import numpy as np
 import torch
 import uvicorn
+import soundfile as sf
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel
 from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
-from pydub import AudioSegment
 
 # ======================================================
 # CONFIGURATION
 # ======================================================
-
-import subprocess
-import shutil
-
-print("FFMPEG PATH:", shutil.which("ffmpeg"))
-print("FFPROBE PATH:", shutil.which("ffprobe"))
-
-try:
-    print(subprocess.run(["ffmpeg", "-version"], capture_output=True).stdout[:100])
-except Exception as e:
-    print("FFMPEG ERROR:", e)
-
 
 MODEL_ID = "Hemgg/Deepfake-audio-detection"
 HF_TOKEN = os.getenv("HF_TOKEN", None)
@@ -62,7 +51,7 @@ class VoiceRequest(BaseModel):
     audioBase64: str
 
 # ======================================================
-# STARTUP: LOAD MODEL ONCE
+# STARTUP: LOAD MODEL
 # ======================================================
 
 @app.on_event("startup")
@@ -73,19 +62,20 @@ def load_model():
         logger.info("Loading model...")
 
         feature_extractor = AutoFeatureExtractor.from_pretrained(
-            MODEL_ID, token=HF_TOKEN
+            MODEL_ID,
+            token=HF_TOKEN
         )
 
         model = AutoModelForAudioClassification.from_pretrained(
-            MODEL_ID, token=HF_TOKEN
+            MODEL_ID,
+            token=HF_TOKEN
         ).to(DEVICE)
 
         model.eval()
-
         logger.info("Model loaded successfully")
 
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
+        logger.error(f"Model loading failed: {e}")
         model = None
 
 # ======================================================
@@ -94,17 +84,14 @@ def load_model():
 
 async def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != API_KEY_VALUE:
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid API key or malformed request"
-        )
+        raise HTTPException(403, "Invalid API key or malformed request")
     return x_api_key
 
 # ======================================================
-# AUDIO PREPROCESSING (ROBUST)
+# ROBUST AUDIO PREPROCESSING (FFMPEG BASED)
 # ======================================================
 
-def preprocess_audio(b64_string: str):
+def preprocess_audio(b64_string):
 
     try:
         if "," in b64_string:
@@ -112,78 +99,78 @@ def preprocess_audio(b64_string: str):
 
         audio_bytes = base64.b64decode(b64_string)
 
-        # Write to temporary file (handles malformed MP3)
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
-            tmp.write(audio_bytes)
-            tmp.flush()
+        if len(audio_bytes) < 1000:
+            raise ValueError("Audio too small")
 
-            audio = AudioSegment.from_file(tmp.name)
+        with tempfile.NamedTemporaryFile(suffix=".mp3") as tmp_in:
+            tmp_in.write(audio_bytes)
+            tmp_in.flush()
 
-        # convert to mono + 16kHz
-        audio = audio.set_channels(1).set_frame_rate(TARGET_SR)
+            with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_out:
 
-        samples = np.array(audio.get_array_of_samples()).astype(np.float32)
+                command = [
+                    "ffmpeg",
+                    "-y",
+                    "-i", tmp_in.name,
+                    "-ac", "1",
+                    "-ar", str(TARGET_SR),
+                    tmp_out.name
+                ]
 
-        # normalize safely
-        max_val = np.max(np.abs(samples))
-        if max_val > 0:
-            samples /= max_val
+                subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True
+                )
 
-        # duration control
-        samples = samples[:MAX_LEN]
-        samples = np.pad(samples, (0, max(0, MAX_LEN - len(samples))))
+                waveform, sr = sf.read(tmp_out.name)
 
-        return samples
+        if waveform.ndim > 1:
+            waveform = waveform.mean(axis=1)
+
+        waveform = waveform[:MAX_LEN]
+        waveform = np.pad(waveform, (0, max(0, MAX_LEN - len(waveform))))
+
+        return waveform.astype(np.float32)
 
     except Exception as e:
         logger.error(f"Audio preprocessing failed: {e}")
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid audio data"
-        )
+        raise HTTPException(400, "Invalid audio data")
 
 # ======================================================
-# ACOUSTIC ANOMALY DETECTOR (SECOND SIGNAL)
+# SAFE ACOUSTIC CHECK (ONLY CONFIDENCE ADJUSTMENT)
 # ======================================================
 
-def acoustic_anomaly_score(waveform):
+def acoustic_confidence_adjustment(waveform, base_confidence):
 
-    energy_variance = np.var(np.abs(waveform))
-    signal_variance = np.var(waveform)
+    energy_var = np.var(np.abs(waveform))
 
-    score = 0.0
+    # very uniform energy → slightly increase AI confidence
+    if energy_var < 0.002:
+        return min(1.0, base_confidence + 0.05)
 
-    # low variance often indicates synthetic speech
-    if energy_variance < 0.003:
-        score += 0.5
+    # strong variation → slightly increase human confidence
+    if energy_var > 0.02:
+        return max(0.0, base_confidence - 0.05)
 
-    if signal_variance < 0.01:
-        score += 0.5
-
-    return min(score, 1.0)
+    return base_confidence
 
 # ======================================================
 # DYNAMIC EXPLANATION
 # ======================================================
 
-def generate_explanation(waveform, classification):
-
-    energy_variance = np.var(np.abs(waveform))
-    signal_variance = np.var(waveform)
+def generate_explanation(classification, confidence):
 
     if classification == "AI_GENERATED":
-
-        if energy_variance < 0.003:
-            return "Very uniform energy distribution and smooth spectral structure indicate synthetic voice characteristics"
-
-        return "Unnatural spectral consistency and low vocal variation detected"
+        if confidence > 0.9:
+            return "Highly consistent spectral patterns indicate synthetic voice"
+        return "Speech characteristics suggest AI-generated audio"
 
     else:
-
-        if energy_variance > 0.01:
-            return "Natural vocal fluctuations and human prosody patterns detected"
-
-        return "Human-like frequency variation observed"
+        if confidence > 0.9:
+            return "Natural vocal variation and human prosody detected"
+        return "Speech characteristics consistent with human voice"
 
 # ======================================================
 # MAIN ENDPOINT
@@ -196,38 +183,23 @@ async def voice_detection(
 ):
 
     if model is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Model not available"
-        )
+        raise HTTPException(500, "Model not available")
 
-    # -----------------------------
-    # INPUT VALIDATION
-    # -----------------------------
+    # ---------------- INPUT VALIDATION ----------------
 
     if request.language not in SUPPORTED_LANGUAGES:
-        raise HTTPException(
-            status_code=400,
-            detail="Unsupported language"
-        )
+        raise HTTPException(400, "Unsupported language")
 
     if request.audioFormat.lower() != "mp3":
-        raise HTTPException(
-            status_code=400,
-            detail="Only mp3 format supported"
-        )
+        raise HTTPException(400, "Only mp3 format supported")
 
     try:
 
-        # -----------------------------
-        # PREPROCESS AUDIO
-        # -----------------------------
+        # ---------------- PREPROCESS ----------------
 
         waveform = preprocess_audio(request.audioBase64)
 
-        # -----------------------------
-        # MODEL INFERENCE
-        # -----------------------------
+        # ---------------- MODEL INFERENCE ----------------
 
         inputs = feature_extractor(
             waveform,
@@ -239,36 +211,20 @@ async def voice_detection(
             logits = model(**inputs).logits
             probs = torch.softmax(logits, dim=-1)
 
-        model_confidence, pred_idx = torch.max(probs, dim=-1)
-        model_score = float(model_confidence.item())
+        confidence, pred_idx = torch.max(probs, dim=-1)
+        confidence = float(confidence.item())
 
-        # correct label mapping
-        model_prediction = model.config.id2label[pred_idx.item()]
+        classification = model.config.id2label[pred_idx.item()]
 
-        # -----------------------------
-        # SECOND SIGNAL: ACOUSTIC CHECK
-        # -----------------------------
+        # ---------------- SAFE CONFIDENCE ADJUSTMENT ----------------
 
-        anomaly_score = acoustic_anomaly_score(waveform)
+        confidence = acoustic_confidence_adjustment(waveform, confidence)
 
-        # ensemble scoring
-        final_score = 0.8 * model_score + 0.2 * anomaly_score
+        confidence = round(confidence, 3)
 
-        classification = (
-            "AI_GENERATED" if final_score > 0.5 else "HUMAN"
-        )
+        # ---------------- EXPLANATION ----------------
 
-        confidence = round(float(final_score), 3)
-
-        # -----------------------------
-        # EXPLANATION
-        # -----------------------------
-
-        explanation = generate_explanation(waveform, classification)
-
-        # -----------------------------
-        # RESPONSE
-        # -----------------------------
+        explanation = generate_explanation(classification, confidence)
 
         return {
             "status": "success",
@@ -283,10 +239,15 @@ async def voice_detection(
 
     except Exception as e:
         logger.error(f"Inference error: {e}")
-        raise HTTPException(
-            status_code=400,
-            detail="Malformed request or processing error"
-        )
+        raise HTTPException(400, "Malformed request or processing error")
+
+# ======================================================
+# HEALTH CHECK
+# ======================================================
+
+@app.get("/")
+def health():
+    return {"status": "API running"}
 
 # ======================================================
 # RUN SERVER
