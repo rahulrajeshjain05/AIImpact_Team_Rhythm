@@ -15,6 +15,18 @@ from pydub import AudioSegment
 # CONFIGURATION
 # ======================================================
 
+import subprocess
+import shutil
+
+print("FFMPEG PATH:", shutil.which("ffmpeg"))
+print("FFPROBE PATH:", shutil.which("ffprobe"))
+
+try:
+    print(subprocess.run(["ffmpeg", "-version"], capture_output=True).stdout[:100])
+except Exception as e:
+    print("FFMPEG ERROR:", e)
+
+
 MODEL_ID = "Hemgg/Deepfake-audio-detection"
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
