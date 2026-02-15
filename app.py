@@ -27,6 +27,15 @@ MAX_LEN = TARGET_SR * MAX_AUDIO_SECONDS
 
 SUPPORTED_LANGUAGES = ["Tamil", "English", "Hindi", "Malayalam", "Telugu"]
 
+MODEL_TO_API_LABEL = {
+    "HumanVoice": "HUMAN",
+    "AIVoice": "AI_GENERATED",
+    "human": "HUMAN",
+    "ai": "AI_GENERATED",
+    "REAL": "HUMAN",
+    "FAKE": "AI_GENERATED"
+}
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 logging.basicConfig(level=logging.INFO)
@@ -214,7 +223,14 @@ async def voice_detection(
         confidence, pred_idx = torch.max(probs, dim=-1)
         confidence = float(confidence.item())
 
-        classification = model.config.id2label[pred_idx.item()]
+        #classification = model.config.id2label[pred_idx.item()]
+        model_prediction_raw = model.config.id2label[pred_idx.item()]
+
+        classification = MODEL_TO_API_LABEL.get(
+            model_prediction_raw,
+            "AI_GENERATED" if "ai" in model_prediction_raw.lower() else "HUMAN"
+        )
+
 
         # ---------------- SAFE CONFIDENCE ADJUSTMENT ----------------
 
