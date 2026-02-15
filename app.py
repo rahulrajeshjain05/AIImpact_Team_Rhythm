@@ -21,7 +21,7 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 API_KEY_VALUE = os.getenv("API_KEY", "sk_test_123456789")
 
 TARGET_SR = 16000
-MAX_AUDIO_SECONDS = 8
+MAX_AUDIO_SECONDS = 3
 MAX_LEN = TARGET_SR * MAX_AUDIO_SECONDS
 
 SUPPORTED_LANGUAGES = ["Tamil", "English", "Hindi", "Malayalam", "Telugu"]
