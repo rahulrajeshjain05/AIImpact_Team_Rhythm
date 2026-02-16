@@ -19,10 +19,10 @@ from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
 MODEL_ID = "Hemgg/Deepfake-audio-detection"
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
-API_KEY_VALUE = os.getenv("API_KEY", "sk_RHYTHM_123456730")
+API_KEY_VALUE = os.getenv("API_KEY", "sk_RHYTHM_17083456730")
 
 TARGET_SR = 16000
-MAX_AUDIO_SECONDS = 22
+MAX_AUDIO_SECONDS = 30
 MAX_LEN = TARGET_SR * MAX_AUDIO_SECONDS
 
 SUPPORTED_LANGUAGES = ["Tamil", "English", "Hindi", "Malayalam", "Telugu"]
